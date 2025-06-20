@@ -1,14 +1,12 @@
 import streamlit as st
 import pandas as pd
-import openai
 from io import BytesIO
+from openai import OpenAI
 
-# OpenAI API Key (꼭 st.secrets로 관리 추천)
-openai.api_key = "YOUR_OPENAI_API_KEY"
+# ✅ API 키는 반드시 Streamlit Cloud > Secrets 에서 관리하세요
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-st.title("⛳ 골프 상품 자동 추출기 (GPT 기반)")
-
-# 엑셀 텍스트 전체 펼치기
+# 📂 엑셀 내용을 문자열로 평탄화
 def flatten_excel(file):
     xl = pd.ExcelFile(BytesIO(file.read()))
     all_text = ''
@@ -19,45 +17,45 @@ def flatten_excel(file):
             all_text += line + '\n'
     return all_text.strip()
 
-# GPT에게 요청
+# 🧠 GPT로 정보 추출 요청
 def extract_info_with_gpt(text):
     prompt = f"""
-다음은 골프여행 상품 설명입니다. 이 안에서 핵심 정보를 JSON 형태로 추출해줘.
-필요 시 부정/조건/기준을 이해해서 정확히 분류해줘.
+다음은 골프여행 상품 설명입니다. 문장과 표에서 정보를 추론해 다음 JSON 구조로 정리해주세요:
 
-필요한 항목:
-- product_name (문장에서 추론)
-- departure_date (가능하면 날짜 추출)
-- region (국가/도시/지역)
-- price (숫자만)
-- includes (포함내역 리스트)
-- excludes (불포함 리스트)
+{{
+  "product_name": "",
+  "departure_date": "",
+  "region": "",
+  "price": ,
+  "includes": [],
+  "excludes": []
+}}
 
 텍스트:
 {text}
 """
 
-    response = openai.ChatCompletion.create(
+    response = client.chat.completions.create(
         model="gpt-4",
-        messages=[{"role": "user", "content": prompt}],
+        messages=[
+            {"role": "user", "content": prompt}
+        ],
         temperature=0
     )
 
-    reply = response.choices[0].message.content
-    try:
-        result = eval(reply)  # GPT 응답이 딕셔너리일 경우
-        return result
-    except:
-        st.warning("⚠️ GPT 응답이 예상과 달라요. 내용 확인해주세요.")
-        return reply
+    return response.choices[0].message.content
 
-# UI
+# 🖥️ Streamlit UI
+st.title("⛳ 골프 여행 엑셀 → GPT 기반 정보 추출기")
+
 uploaded = st.file_uploader("📂 엑셀 파일 업로드", type=["xls", "xlsx"])
 if uploaded:
     text = flatten_excel(uploaded)
-    st.text_area("📋 전체 텍스트", text, height=200)
+    st.text_area("📄 전체 텍스트 보기", text, height=250)
 
     if st.button("🧠 GPT로 정보 추출하기"):
-        result = extract_info_with_gpt(text)
+        with st.spinner("GPT가 정보를 분석 중입니다..."):
+            result = extract_info_with_gpt(text)
+
         st.subheader("📦 추출된 정보")
-        st.json(result)
+        st.code(result, language="json")
