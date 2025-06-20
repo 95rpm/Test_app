@@ -3,10 +3,10 @@ import pandas as pd
 from io import BytesIO
 from openai import OpenAI
 
-# ✅ API 키는 반드시 Streamlit Cloud > Secrets 에서 관리하세요
+# ✅ GPT 클라이언트 초기화 (Secrets에 API 키 등록 필수)
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-# 📂 엑셀 내용을 문자열로 평탄화
+# 📂 엑셀 전체 텍스트 평탄화 함수
 def flatten_excel(file):
     xl = pd.ExcelFile(BytesIO(file.read()))
     all_text = ''
@@ -17,10 +17,10 @@ def flatten_excel(file):
             all_text += line + '\n'
     return all_text.strip()
 
-# 🧠 GPT로 정보 추출 요청
+# 🧠 GPT로 상품 정보 추출
 def extract_info_with_gpt(text):
     prompt = f"""
-다음은 골프여행 상품 설명입니다. 문장과 표에서 정보를 추론해 다음 JSON 구조로 정리해주세요:
+다음은 골프여행 상품 설명입니다. 문장과 표를 분석해서 다음 JSON 구조로 추출해줘:
 
 {{
   "product_name": "",
@@ -45,17 +45,18 @@ def extract_info_with_gpt(text):
 
     return response.choices[0].message.content
 
-# 🖥️ Streamlit UI
-st.title("⛳ 골프 여행 엑셀 → GPT 기반 정보 추출기")
+# 🖥️ Streamlit 인터페이스
+st.set_page_config(page_title="골프 견적 추출기", layout="wide")
+st.title("⛳ 골프 여행 상품 엑셀 → GPT 정보 추출")
 
 uploaded = st.file_uploader("📂 엑셀 파일 업로드", type=["xls", "xlsx"])
 if uploaded:
     text = flatten_excel(uploaded)
-    st.text_area("📄 전체 텍스트 보기", text, height=250)
+    st.text_area("📋 엑셀에서 추출된 전체 텍스트", text, height=250)
 
     if st.button("🧠 GPT로 정보 추출하기"):
-        with st.spinner("GPT가 정보를 분석 중입니다..."):
+        with st.spinner("GPT가 내용을 분석 중입니다..."):
             result = extract_info_with_gpt(text)
 
-        st.subheader("📦 추출된 정보")
+        st.subheader("📦 GPT가 추출한 결과")
         st.code(result, language="json")
