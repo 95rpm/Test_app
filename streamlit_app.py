@@ -1,230 +1,327 @@
 import streamlit as st
 import pandas as pd
-import json
-from io import BytesIO
-from openai import OpenAI
+import PyPDF2
 import openpyxl
+from PIL import Image
+import io
+import base64
+import openai
+from supabase import create_client, Client
+import json
+import os
+from datetime import datetime
+import uuid
 
-# API 키 확인
+# 페이지 설정
 
-if “OPENAI_API_KEY” not in st.secrets:
-st.error(“🚨 OpenAI API 키가 설정되지 않았습니다!”)
+st.set_page_config(
+page_title=“파일 정보 추출 시스템”,
+page_icon=“📄”,
+layout=“wide”
+)
+
+# 환경 변수 설정 (Streamlit secrets 사용)
+
+try:
+OPENAI_API_KEY = st.secrets[“OPENAI_API_KEY”]
+SUPABASE_URL = st.secrets[“SUPABASE_URL”]
+SUPABASE_KEY = st.secrets[“SUPABASE_KEY”]
+except KeyError:
+st.error(“환경 변수가 설정되지 않았습니다. Streamlit secrets를 확인해주세요.”)
 st.stop()
 
-# ✅ OpenAI 클라이언트 초기화
+# OpenAI 클라이언트 초기화
 
-client = OpenAI(api_key=st.secrets[“OPENAI_API_KEY”])
+openai.api_key = OPENAI_API_KEY
 
-# 📂 엑셀 파일에서 모든 텍스트 추출 (개선된 버전)
+# Supabase 클라이언트 초기화
 
-def flatten_excel(file):
-try:
-# 파일 내용을 바이트스트림으로 읽기
-file_content = file.getvalue()
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+class FileProcessor:
+“”“파일 처리 클래스”””
 
 ```
-    # openpyxl로 직접 읽기 (더 안정적)
-    workbook = openpyxl.load_workbook(BytesIO(file_content), data_only=True)
-    all_text = ''
-    
-    for sheet_name in workbook.sheetnames:
-        sheet = workbook[sheet_name]
-        st.info(f"📄 '{sheet_name}' 시트 처리 중...")
-        
-        for row in sheet.iter_rows(values_only=True):
-            # None이 아닌 값들만 필터링하고 문자열로 변환
-            row_text = []
-            for cell in row:
-                if cell is not None:
-                    row_text.append(str(cell))
-            
-            if row_text:  # 빈 행이 아닐 때만 추가
-                all_text += ' '.join(row_text) + '\n'
-    
-    workbook.close()
-    
-    if not all_text.strip():
-        st.warning("⚠️ 엑셀 파일에서 텍스트를 찾을 수 없습니다.")
-        return ""
-    
-    st.success(f"✅ 총 {len(all_text)} 글자 추출 완료!")
-    return all_text.strip()
-    
-except Exception as e:
-    st.error(f"❌ 엑셀 파일 읽기 오류: {str(e)}")
-    
-    # 대안으로 pandas 시도
+def __init__(self):
+    self.supported_formats = {
+        'pdf': self.extract_pdf_text,
+        'xlsx': self.extract_excel_data,
+        'xls': self.extract_excel_data,
+        'jpg': self.extract_image_text,
+        'jpeg': self.extract_image_text,
+        'png': self.extract_image_text
+    }
+
+def extract_pdf_text(self, file):
+    """PDF 텍스트 추출"""
     try:
-        st.info("🔄 pandas로 재시도 중...")
-        file_content = file.getvalue()
-        xl = pd.ExcelFile(BytesIO(file_content))
-        all_text = ''
+        pdf_reader = PyPDF2.PdfReader(file)
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() + "\n"
+        return text
+    except Exception as e:
+        st.error(f"PDF 처리 중 오류 발생: {str(e)}")
+        return None
+
+def extract_excel_data(self, file):
+    """Excel 데이터 추출"""
+    try:
+        df = pd.read_excel(file)
+        # 데이터프레임을 텍스트로 변환
+        text = df.to_string(index=False)
+        return text
+    except Exception as e:
+        st.error(f"Excel 처리 중 오류 발생: {str(e)}")
+        return None
+
+def extract_image_text(self, file):
+    """이미지에서 텍스트 추출 (GPT-4V 사용)"""
+    try:
+        # 이미지를 base64로 인코딩
+        image = Image.open(file)
+        buffered = io.BytesIO()
+        image.save(buffered, format="PNG")
+        img_base64 = base64.b64encode(buffered.getvalue()).decode()
         
-        for sheet in xl.sheet_names:
-            df = xl.parse(sheet, header=None)
-            for _, row in df.iterrows():
-                line = ' '.join([str(cell) for cell in row if pd.notna(cell)])
-                if line.strip():
-                    all_text += line + '\n'
-        
-        return all_text.strip() if all_text.strip() else ""
-        
-    except Exception as e2:
-        st.error(f"❌ pandas로도 읽기 실패: {str(e2)}")
-        return ""
-```
+        return f"data:image/png;base64,{img_base64}"
+    except Exception as e:
+        st.error(f"이미지 처리 중 오류 발생: {str(e)}")
+        return None
 
-# 🧠 GPT로 실무형 정보 추출
-
-def extract_info_with_gpt(text):
-try:
-# 텍스트가 너무 길면 앞부분만 사용 (GPT 토큰 제한)
-if len(text) > 10000:
-text = text[:10000] + “\n[텍스트가 길어서 앞부분만 분석합니다]”
-st.warning(“⚠️ 텍스트가 너무 길어 앞부분만 분석합니다.”)
-
-```
-    prompt = f"""
-```
-
-너는 여행사에서 사용하는 ‘골프여행 상품 견적 자동화 시스템’에 탑재된 GPT 분석기야.  
-업로드된 상품 설명 문서에서 **아래 JSON 구조**에 맞춰 필요한 정보를 정확하게 추출해줘.
-
-반드시 지켜야 할 규칙은 다음과 같아
-
-1. 모든 항목을 JSON 포맷으로 출력해. 텍스트나 설명 말고 JSON만 반환해.
-1. 항목이 없는 경우에도 null 또는 빈 배열 []로 명시적으로 채워.
-1. 숫자는 따옴표 없이 숫자형(int)으로 출력해.
-1. “price_by_date”는 날짜별 가격이 있다면 최대 5개까지 정리해주고, 없다면 빈 배열로.
-1. “flight_included”는 항공이 포함되었는지 문맥을 이해해서 true/false로 정확하게 판단해.
-1. 포함/불포함 항목은 문장이나 표로 표현된 내용까지 감지해서 배열로 정리해.
-
-출력 JSON 형식은 아래와 같아. 이 형식을 그대로 유지해줘:
-
-{{
-“product_name”: “”,
-“region”: “”,
-“departure_date”: “”,
-“duration”: “”,
-“rounds_per_day”: “”,
-“total_rounds”: “”,
-“price”: null,
-“price_by_date”: [
-{{
-“date”: “2025-07-01”,
-“price”: 1390000
-}},
-{{
-“date”: “2025-07-08”,
-“price”: 1490000
-}}
-],
-“flight_included”: false,
-“includes”: [],
-“excludes”: [],
-“hotel”: “”,
-“golf_courses”: [],
-“transport”: “”,
-“extra_charges”: {{
-“single_charge”: null,
-“caddie_fee”: null,
-“cart_fee”: null
-}}
-}}
-
-이제 아래 텍스트를 분석해서 위 JSON 형식으로 추출해줘:
-
-{text}
-“””
-response = client.chat.completions.create(
-model=“gpt-4”,
-messages=[{“role”: “user”, “content”: prompt}],
-temperature=0,
-max_tokens=2000
-)
-return response.choices[0].message.content
-
-```
-except Exception as e:
-    st.error(f"❌ GPT API 호출 오류: {str(e)}")
-    return ""
-```
-
-# 🖥️ Streamlit 웹앱 UI 구성
-
-st.set_page_config(page_title=“⛳ 골프상품 자동추출기”, layout=“wide”)
-st.title(“⛳ 실무용 골프 여행 상품 자동 추출기”)
-
-# 파일 업로드 안내
-
-st.info(“📋 **사용법**: 엑셀 파일(.xlsx, .xls)을 업로드하면 자동으로 골프 상품 정보를 추출합니다.”)
-
-uploaded = st.file_uploader(“📂 엑셀 파일을 업로드하세요”, type=[“xls”, “xlsx”])
-
-if uploaded:
-# 파일 정보 표시
-st.success(f”📁 파일 업로드 완료: {uploaded.name} ({uploaded.size:,} bytes)”)
-
-```
-with st.spinner("📖 엑셀 파일을 읽는 중..."):
-    text = flatten_excel(uploaded)
-
-if text:  # 텍스트가 있을 때만 표시
-    with st.expander("📋 추출된 텍스트 미리보기", expanded=False):
-        preview_text = text[:1000] + "..." if len(text) > 1000 else text
-        st.text_area("", preview_text, height=200)
+def process_file(self, file):
+    """파일 형식에 따라 적절한 처리 함수 호출"""
+    file_extension = file.name.split('.')[-1].lower()
     
-    if st.button("🧠 GPT로 정보 추출", type="primary"):
-        with st.spinner("🤖 GPT가 내용을 분석 중입니다..."):
-            result = extract_info_with_gpt(text)
-        
-        if result:  # 결과가 있을 때만 처리
-            st.subheader("📦 GPT 응답")
-            
-            # JSON 코드 블록에서 JSON만 추출
-            if "```json" in result:
-                json_start = result.find("```json") + 7
-                json_end = result.find("```", json_start)
-                if json_end != -1:
-                    result = result[json_start:json_end].strip()
-            
-            st.code(result, language="json")
-            
-            try:
-                parsed = json.loads(result)
-                st.success("✅ JSON 파싱 성공!")
-                
-                # 예쁘게 표시
-                st.subheader("📊 추출된 정보")
-                
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.write("**기본 정보**")
-                    st.write(f"🏷️ **상품명**: {parsed.get('product_name', 'N/A')}")
-                    st.write(f"🌍 **지역**: {parsed.get('region', 'N/A')}")
-                    st.write(f"📅 **출발일**: {parsed.get('departure_date', 'N/A')}")
-                    st.write(f"⏰ **기간**: {parsed.get('duration', 'N/A')}")
-                    st.write(f"⛳ **총 라운드**: {parsed.get('total_rounds', 'N/A')}")
-                
-                with col2:
-                    st.write("**가격 정보**")
-                    if parsed.get('price'):
-                        st.write(f"💰 **가격**: {parsed['price']:,}원")
-                    
-                    if parsed.get('price_by_date'):
-                        st.write("📅 **날짜별 가격**:")
-                        for item in parsed['price_by_date']:
-                            st.write(f"  - {item.get('date')}: {item.get('price', 0):,}원")
-                
-                # 전체 JSON 표시
-                with st.expander("📄 전체 JSON 데이터", expanded=False):
-                    st.json(parsed)
-                    
-            except json.JSONDecodeError as e:
-                st.error(f"❌ JSON 파싱 실패: {str(e)}")
-                st.write("**원본 응답:**")
-                st.text(result)
-else:
-    st.warning("⚠️ 엑셀 파일에서 텍스트를 추출할 수 없습니다. 파일 형식을 확인해주세요.")
+    if file_extension in self.supported_formats:
+        return self.supported_formats[file_extension](file)
+    else:
+        st.error(f"지원하지 않는 파일 형식입니다: {file_extension}")
+        return None
 ```
+
+class GPTProcessor:
+“”“GPT API를 이용한 정보 추출 클래스”””
+
+```
+def __init__(self):
+    self.client = openai.OpenAI(api_key=OPENAI_API_KEY)
+
+def extract_information(self, content, file_type, extraction_prompt):
+    """GPT API를 이용해 정보 추출"""
+    try:
+        if file_type in ['jpg', 'jpeg', 'png']:
+            # 이미지 분석
+            response = self.client.chat.completions.create(
+                model="gpt-4-vision-preview",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": extraction_prompt
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": content
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens=1000
+            )
+        else:
+            # 텍스트 분석
+            response = self.client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "당신은 문서에서 중요한 정보를 추출하는 전문가입니다. 요청된 정보를 JSON 형태로 구조화하여 반환해주세요."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"{extraction_prompt}\n\n문서 내용:\n{content}"
+                    }
+                ],
+                max_tokens=1000
+            )
+        
+        return response.choices[0].message.content
+    except Exception as e:
+        st.error(f"GPT API 처리 중 오류 발생: {str(e)}")
+        return None
+```
+
+class DatabaseManager:
+“”“Supabase 데이터베이스 관리 클래스”””
+
+```
+def __init__(self):
+    self.supabase = supabase
+
+def save_extracted_data(self, file_name, file_type, extracted_data, original_content):
+    """추출된 데이터를 데이터베이스에 저장"""
+    try:
+        data = {
+            "id": str(uuid.uuid4()),
+            "file_name": file_name,
+            "file_type": file_type,
+            "extracted_data": extracted_data,
+            "original_content": original_content[:5000] if len(original_content) > 5000 else original_content,  # 내용 제한
+            "created_at": datetime.now().isoformat(),
+            "processed": True
+        }
+        
+        result = self.supabase.table("extracted_files").insert(data).execute()
+        return result.data[0] if result.data else None
+    except Exception as e:
+        st.error(f"데이터베이스 저장 중 오류 발생: {str(e)}")
+        return None
+
+def get_all_records(self):
+    """모든 레코드 조회"""
+    try:
+        result = self.supabase.table("extracted_files").select("*").order("created_at", desc=True).execute()
+        return result.data
+    except Exception as e:
+        st.error(f"데이터 조회 중 오류 발생: {str(e)}")
+        return []
+```
+
+def main():
+“”“메인 애플리케이션”””
+st.title(“📄 파일 정보 추출 시스템”)
+st.markdown(”—”)
+
+```
+# 사이드바 설정
+st.sidebar.title("설정")
+
+# 추출 프롬프트 설정
+extraction_prompt = st.sidebar.text_area(
+    "정보 추출 프롬프트",
+    value="""다음 문서에서 중요한 정보를 추출해주세요:
+```
+
+- 제목 또는 주제
+- 주요 키워드 (5개 이내)
+- 핵심 내용 요약
+- 날짜 정보 (있는 경우)
+- 연락처 정보 (있는 경우)
+- 금액 정보 (있는 경우)
+
+결과를 JSON 형태로 반환해주세요.”””,
+height=200
+)
+
+```
+# 인스턴스 생성
+file_processor = FileProcessor()
+gpt_processor = GPTProcessor()
+db_manager = DatabaseManager()
+
+# 메인 컨텐츠
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    st.header("파일 업로드")
+    
+    uploaded_file = st.file_uploader(
+        "파일을 선택하세요",
+        type=['pdf', 'xlsx', 'xls', 'jpg', 'jpeg', 'png'],
+        help="지원 형식: PDF, Excel, 이미지 파일"
+    )
+    
+    if uploaded_file is not None:
+        st.success(f"파일 업로드 완료: {uploaded_file.name}")
+        
+        # 파일 정보 표시
+        file_details = {
+            "파일명": uploaded_file.name,
+            "파일 크기": f"{uploaded_file.size:,} bytes",
+            "파일 형식": uploaded_file.type
+        }
+        st.json(file_details)
+        
+        # 처리 버튼
+        if st.button("파일 처리 시작", type="primary"):
+            with st.spinner("파일 처리 중..."):
+                # 1. 파일 내용 추출
+                content = file_processor.process_file(uploaded_file)
+                
+                if content:
+                    st.success("파일 내용 추출 완료!")
+                    
+                    # 2. GPT API로 정보 추출
+                    with st.spinner("GPT API로 정보 추출 중..."):
+                        file_extension = uploaded_file.name.split('.')[-1].lower()
+                        extracted_info = gpt_processor.extract_information(
+                            content, file_extension, extraction_prompt
+                        )
+                        
+                        if extracted_info:
+                            st.success("정보 추출 완료!")
+                            
+                            # 3. 데이터베이스에 저장
+                            with st.spinner("데이터베이스에 저장 중..."):
+                                saved_record = db_manager.save_extracted_data(
+                                    uploaded_file.name,
+                                    file_extension,
+                                    extracted_info,
+                                    content if isinstance(content, str) else str(content)
+                                )
+                                
+                                if saved_record:
+                                    st.success("데이터베이스 저장 완료!")
+                                    
+                                    # 추출된 정보 표시
+                                    st.subheader("추출된 정보")
+                                    st.text_area("결과", extracted_info, height=300)
+                                    
+                                    # JSON 파싱 시도
+                                    try:
+                                        json_data = json.loads(extracted_info)
+                                        st.json(json_data)
+                                    except:
+                                        st.info("JSON 형태로 파싱할 수 없습니다. 텍스트 형태로 표시됩니다.")
+
+with col2:
+    st.header("처리 기록")
+    
+    # 새로고침 버튼
+    if st.button("기록 새로고침"):
+        st.rerun()
+    
+    # 저장된 기록 조회
+    records = db_manager.get_all_records()
+    
+    if records:
+        for record in records[:10]:  # 최근 10개만 표시
+            with st.expander(f"{record['file_name']} ({record['created_at'][:10]})"):
+                st.write(f"**파일 형식:** {record['file_type']}")
+                st.write(f"**처리 시간:** {record['created_at']}")
+                
+                if record['extracted_data']:
+                    st.write("**추출된 정보:**")
+                    st.text_area("", record['extracted_data'], height=100, key=f"record_{record['id']}")
+    else:
+        st.info("저장된 기록이 없습니다.")
+
+# 푸터
+st.markdown("---")
+st.markdown(
+    """
+    <div style='text-align: center'>
+        <p>📄 파일 정보 추출 시스템 | Powered by OpenAI GPT & Supabase</p>
+    </div>
+    """, 
+    unsafe_allow_html=True
+)
+```
+
+if **name** == “**main**”:
+main()
