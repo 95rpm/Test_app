@@ -9,7 +9,7 @@ client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # 📂 엑셀 파일에서 모든 텍스트 추출
 def flatten_excel(file):
-    xl = pd.ExcelFile(BytesIO(file.read()))
+    xl = pd.ExcelFile(BytesIO(file.read()), engine="openpyxl")
     all_text = ''
     for sheet in xl.sheet_names:
         df = xl.parse(sheet, header=None)
@@ -21,11 +21,19 @@ def flatten_excel(file):
 # 🧠 GPT로 실무형 정보 추출
 def extract_info_with_gpt(text):
     prompt = f"""
-아래는 골프 여행 상품 엑셀에서 추출한 텍스트입니다.
-표와 문장을 분석하여 다음 JSON 형식으로 필요한 정보를 추출해 주세요.
+너는 여행사에서 사용하는 '골프여행 상품 견적 자동화 시스템'에 탑재된 GPT 분석기야.  
+업로드된 상품 설명 문서에서 **아래 JSON 구조**에 맞춰 필요한 정보를 정확하게 추출해줘.
 
-- JSON 항목은 실무에서 견적서 자동 생성을 위해 모두 필요합니다.
-- 텍스트에 없으면 null 또는 빈 배열로 출력하세요.
+반드시 지켜야 할 규칙은 다음과 같아
+
+1. 모든 항목을 JSON 포맷으로 출력해. 텍스트나 설명 말고 JSON만 반환해.
+2. 항목이 없는 경우에도 null 또는 빈 배열 []로 명시적으로 채워.
+3. 숫자는 따옴표 없이 숫자형(int)으로 출력해.
+4. "price_by_date"는 날짜별 가격이 있다면 최대 5개까지 정리해주고, 없다면 빈 배열로.
+5. "flight_included"는 항공이 포함되었는지 문맥을 이해해서 true/false로 정확하게 판단해.
+6. 포함/불포함 항목은 문장이나 표로 표현된 내용까지 감지해서 배열로 정리해.
+
+출력 JSON 형식은 아래와 같아. 이 형식을 그대로 유지해줘:
 
 ```json
 {{
@@ -59,7 +67,7 @@ def extract_info_with_gpt(text):
   }}
 }}
 
-아래 텍스트에서 이 정보를 추출하세요:
+이제 아래 텍스트를 분석해서 위 JSON 형식으로 추출해줘:
 
 {text}
 “””
@@ -70,7 +78,7 @@ temperature=0
 )
 return response.choices[0].message.content
 
-🖥️ Streamlit 웹앱 UI 구성
+#🖥️ Streamlit 웹앱 UI 구성
 
 st.set_page_config(page_title=“⛳ 골프상품 자동추출기”, layout=“wide”)
 st.title(“⛳ 실무용 골프 여행 상품 자동 추출기”)
@@ -95,4 +103,3 @@ if st.button("🧠 GPT로 정보 추출"):
         st.json(parsed)
     except Exception as e:
         st.error(f"❌ JSON 파싱 실패: {e}")
-        
